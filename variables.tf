@@ -43,7 +43,7 @@ variable "aws_account_id" {
 variable "add_oidc_aud_condition" {
   description = "Whether to add the ':aud' condition (checking for 'sts.amazonaws.com') to the OIDC trust policy. Recommended for EKS."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "role_description" {
