@@ -15,7 +15,7 @@ module "this" {
   }
   # existing_policy_arns is defaulted to [] by the module
 }
-
+```
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
