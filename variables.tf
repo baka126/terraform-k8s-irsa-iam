@@ -7,7 +7,6 @@ variable "region" {
   type        = string
   default     = "us-east-1"
 }
-# Module: modules/iam_role_for_k8s_sa_flexible_policy/variables.tf
 
 variable "create_role" {
   description = "Whether to create the IAM role and associated policies. If false, no resources will be created by this module."

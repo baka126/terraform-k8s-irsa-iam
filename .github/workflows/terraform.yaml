@@ -49,7 +49,7 @@ jobs:
 
       - name: Go Setup
         uses: actions/setup-go@v5
-        with: 
+        with:
           go-version: '^1.20'
 
       - name: Download Go Modules
