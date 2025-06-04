@@ -57,3 +57,28 @@ data "aws_iam_policy_document" "k8s_assume_role_policy" {
     }
   }
 }
+resource "aws_iam_role" "this" {
+  count = var.create_role ? 1 : 0
+
+  name               = var.role_name
+  assume_role_policy = data.aws_iam_policy_document.k8s_assume_role_policy.json
+  description        = local.role_description_final
+  tags               = var.tags
+
+  depends_on = [null_resource.validation]
+}
+
+resource "aws_iam_role_policy" "this" {
+  count = local.should_create_inline_policy ? 1 : 0
+
+  name   = var.inline_policy_name
+  role   = aws_iam_role.this[0].id
+  policy = var.inline_policy_document_json
+}
+
+resource "aws_iam_role_policy_attachment" "this" {
+  for_each = var.create_role ? var.existing_policy_attachments_map : {}
+
+  role       = aws_iam_role.this[0].name
+  policy_arn = each.value
+}
