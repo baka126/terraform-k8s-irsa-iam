@@ -25,7 +25,6 @@ permissions:
 env:
   terraformVersion: 1.3.6
   terraformWorkDir: ./examples/complete
-  terraformS3Encryption: true
   awsRegion: us-east-1
 
 jobs:
