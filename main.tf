@@ -12,3 +12,13 @@ locals {
   should_create_inline_policy = var.create_role && var.inline_policy_document_json != null
 }
 
+resource "null_resource" "validation" {
+  count = var.create_role ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition     = !local.should_create_inline_policy || (local.should_create_inline_policy && var.inline_policy_name != null)
+      error_message = "Configuration error: If 'inline_policy_document_json' is provided and 'create_role' is true, 'inline_policy_name' must also be specified."
+    }
+  }
+}
