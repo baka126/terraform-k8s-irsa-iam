@@ -22,3 +22,38 @@ resource "null_resource" "validation" {
     }
   }
 }
+data "aws_iam_policy_document" "k8s_assume_role_policy" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    effect  = "Allow"
+
+    principals {
+      type        = "Federated"
+      identifiers = ["arn:${local.partition}:iam::${local.account_id}:oidc-provider/${var.eks_oidc_provider_url}"]
+    }
+
+    # :sub condition (Subject - the service account)
+    condition {
+      test     = "StringEquals"
+      variable = "${var.eks_oidc_provider_url}:sub"
+      values   = ["system:serviceaccount:${var.kubernetes_namespace}:${var.kubernetes_service_account_name}"]
+    }
+
+    # Conditional :aud condition (Audience - sts.amazonaws.com)
+    dynamic "condition" {
+      for_each = var.add_oidc_aud_condition ? [
+        { # Using a list of one map to construct the dynamic block
+          test     = "StringEquals"
+          variable = "${var.eks_oidc_provider_url}:aud"
+          values   = ["sts.amazonaws.com"] # Standard audience for EKS IRSA
+        }
+      ] : [] # Empty list if condition should not be added
+
+      content {
+        test     = condition.value.test
+        variable = condition.value.variable
+        values   = condition.value.values
+      }
+    }
+  }
+}
