@@ -1,0 +1,277 @@
+---
+# .github/workflows/terraform.yaml
+name: Terraform - validation
+run-name: '[${{ github.event_name }} - ${{ github.ref_name }}] Terraform executed by @${{ github.actor }}'
+
+on:
+  push:
+    paths-ignore:
+      - '.github/workflows/release.yml'
+      - 'CHANGELOG.md'
+    branches:
+      - '**'
+  pull_request:
+    paths-ignore:
+      - '.github/workflows/release.yml'
+      - 'CHANGELOG.md'
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  terraformVersion: 1.3.6
+  terraformWorkDir: ./examples/complete
+  terraformS3Key: ${{ secrets.ADEX_POC }}/${{ github.repository}}/${{ github.ref_name}}
+  terraformModulesGithubOrg: ${{ github.repository_owner}}
+  terraformBucket: adex-terraform-state
+  terraformDynamo: adex-terraform-state
+  terraformS3Acl: bucket-owner-full-control
+  SONAR_HOST_URL: https://sonarqube.internal.adex.ltd
+  terraformS3Encryption: true
+
+  awsRegion: us-east-1
+  githubToken: ${{ secrets.ADEX_GITHUB_TOKEN }}
+  awsIamRoleSessionDuration: 7200
+
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4.0.0
+
+      - name: Go Setup
+        uses: actions/setup-go@v5
+        with: 
+          go-version: '^1.20'
+
+      - name: Download Go Modules
+        working-directory: test
+        run: go mod download
+
+      - name: Install JQ Tool
+        uses: mbround18/install-jq@v1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.terraformVersion }}
+          terraform_wrapper: false
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.ADEX_POC }}:role/Github-OIDC-role
+          role-session-name: OIDCSession
+          aws-region: ${{ env.awsRegion }}
+          role-duration-seconds: ${{ env.awsIamRoleSessionDuration }}
+
+      - name: Setup git repo credentials for terraform modules
+        run: |
+          git config --global \
+          url."https://git:${{ env.githubToken }}@github.com/${{ env.terraformModulesGithubOrg }}".insteadOf \
+          "https://github.com/${{ env.terraformModulesGithubOrg }}"
+        shell: sh
+
+      - name: Terraform Initialize
+        id: init
+        run: |
+          cd ${{ env.terraformWorkDir }}
+          terraform init -backend-config="bucket=${{ env.terraformBucket }}" -backend-config="dynamodb_table=${{ env.terraformDynamo }}" -backend-config="key=${{ env.terraformS3Key}}" -backend-config="region=${{ env.awsRegion }}" -backend-config="acl=${{ env.terraformS3Acl }}" -backend-config="encrypt=${{ env.terraformS3Encryption }}"
+
+      - name: Terraform Format
+        run: terraform fmt --check
+
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+         directory: .
+         quiet: true # optional: display only failed checks
+         skip_check: CKV_GHA_7
+
+      - name: Terraform Validate
+        run: |
+          cd ${{ env.terraformWorkDir }}
+          terraform validate
+
+      - name: Run Trivy vulnerability scanner in repo mode
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          ignore-unfixed: true
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL'
+
+      - name: Git fetch for sonarqube commits
+        run: |
+          git fetch --unshallow || true
+
+      - name: Setup SonarQube scanner
+        uses: warchant/setup-sonar-scanner@v8
+
+      - name: SonarQube Scanner-project properties file
+        run: |
+          sonar-scanner \
+            -Dsonar.projectKey=${{ github.event.repository.name }} \
+            -Dsonar.projectVersion=${{ github.run_number }}-${GITHUB_REF#refs/heads/} \
+            -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+      - name: SonarQube Quality Gate check
+        id: sonarqube-quality-gate-check
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+
+      - name: "show SonarQube Quality Gate Status value"
+        run: echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }} link:"${{ env.SONAR_HOST_URL }}/dashboard?id=${{ github.event.repository.name }}" "
+
+      - name: Run Terratest
+        run: |
+          cd test
+          go test -v -timeout 120m
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v2
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4.0.0
+        with:
+          ref: '${{ github.event.pull_request.base.ref }}'
+
+      - name: Generate Infracost cost estimate baseline
+        run: |
+          infracost breakdown --path=.  \
+                        --format=json \
+                        --out-file=/tmp/infracost-base.json
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4.0.0
+
+      - name: Generate Infracost diff
+        id: infracost-diff
+        run: |
+          infracost diff --path=${{ env.terraformWorkDir }} \
+                          --format=json \
+                          --compare-to=/tmp/infracost-base.json \
+                          --out-file=/tmp/infracost.json
+
+      - name: Post Infracost comment
+        if: steps.infracost-diff.outcome == 'success' && github.event_name == 'pull_request'
+        run: |
+          infracost comment github \
+            --path=/tmp/infracost.json \
+           --pull-request=${{ github.event.number }} \
+            --repo=${{ github.repository }} \
+            --github-token=${{ github.token }}
+
+  plan:
+    name: Terraform Plan
+    needs: lint
+    runs-on: ubuntu-20.04
+
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@v4.0.0
+
+      - name: Setup git repo credentials for terraform modules
+        run: |
+          git config --global \
+          url."https://git:${{ env.githubToken }}@github.com/${{ env.terraformModulesGithubOrg }}".insteadOf \
+          "https://github.com/${{ env.terraformModulesGithubOrg }}"
+        shell: sh
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.ADEX_POC }}:role/Github-OIDC-role
+          role-session-name: OIDCSession
+          aws-region: ${{ env.awsRegion }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.terraformVersion }}
+
+      - name: Terraform Initialize
+        id: init
+        run: |
+          cd ${{ env.terraformWorkDir }}
+          terraform init -backend-config="bucket=${{ env.terraformBucket }}" -backend-config="dynamodb_table=${{ env.terraformDynamo }}" -backend-config="key=${{ env.terraformS3Key}}" -backend-config="region=${{ env.awsRegion }}" -backend-config="acl=${{ env.terraformS3Acl }}" -backend-config="encrypt=${{ env.terraformS3Encryption }}"
+
+      - name: Terraform Plans
+        id: plan
+        continue-on-error: true
+        run: |
+          cd ${{ env.terraformWorkDir }}
+          terraform plan -var-file=dev.tfvars -no-color -out tf.plan
+
+      - name: Upload Terraform Plan File
+        if: steps.plan.outcome == 'success' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4.0.0
+        with:
+          name: tf.plan
+          path: ${{ env.terraformWorkDir }}/tf.plan
+          retention-days: 3
+
+      - name: Terraform Show
+        if: steps.plan.outcome == 'success' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
+        id: show
+        run: |-
+          echo '${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}' \
+          | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > /tmp/plan.txt
+          PLAN=$(cat /tmp/plan.txt)
+          echo "PLAN<<EOF" >> $GITHUB_ENV
+          echo "$PLAN" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Post Plan to GitHub PR
+        if: steps.plan.outcome == 'success' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
+        uses: mshick/add-pr-comment@v2
+        with:
+          allow-repeats: true
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            ## Terraform Plan
+            ### Environment: ${{ github.base_ref }}
+            ### Region: us-east-1
+            ***Author***: `${{ github.actor }}` ***Action***: `${{ github.event_name }}`
+            ***Working Directory***: `${{ env.terraformWorkDir }}`
+            ***Workflow***: `${{ github.workflow }}`
+            Please review below Terraform plan before accepting merge request:
+            ```diff
+            ${{ env.PLAN }}
+            ```
+
+      - name: Post Plan Failure
+        if: steps.plan.outcome == 'failure' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
+        uses: mshick/add-pr-comment@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            ## Terraform Plan
+            ### Environment: ${{ github.base_ref }}
+            ### Region: us-east-1
+            ***Author***: `${{ github.actor }}` ***Action***: `${{ github.event_name }}`
+            ***Working Directory***: `${{ env.terraformWorkDir }}`
+            ***Workflow***: `${{ github.workflow }}`
+            ```
+            ${{ steps.plan.outputs.stderr }}
+            ```
+
+      - name: Stop pipeline if failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

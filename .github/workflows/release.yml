@@ -1,0 +1,66 @@
+name: Tag and Release
+
+on:
+  workflow_dispatch:
+    #checkov:skip=CKV_GHA_7:GitHub Actions workflow_dispatch inputs MUST NOT be empty.
+    inputs:
+      tag_name:
+        description: "New Tag version"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+run-name: Tag and Release v${{ github.event.inputs.tag_name }}
+jobs:
+  build:
+    name: Create Release
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Generate Release Notes
+        run: |
+          PREVIOUS_RELEASE=$(cat CHANGELOG.md| grep '^## [0-9]\.[0-9]\.[0-9] (' | sed -n 2p)
+          csplit -sf file -n 1 CHANGELOG.md "/$PREVIOUS_RELEASE/"
+          mv file0 /tmp/release-notes.txt
+          rm file1
+          RELEASE_DATE=`date +%B' '%e', '%Y`
+          sed -i -e "1 s/(Unreleased)/($RELEASE_DATE)/" /tmp/release-notes.txt
+
+      - name: Bump version and push tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          custom_tag: ${{ github.event.inputs.tag_name }}
+
+      - name: Create a GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag_version.outputs.new_tag }}
+          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          bodyFile: /tmp/release-notes.txt
+
+      - name: Add next release template
+        run: |
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          RELEASE_DATE=`date +%B' '%e', '%Y`
+          sed -i -e "1 s/(Unreleased)/($RELEASE_DATE)/" CHANGELOG.md
+          sed -i '1i## x.y.z (Unreleased)\n\nBREAKING CHANGES:\n\nNOTES:\n\nFEATURES:\n\nENHANCEMENTS:\n\nBUG FIXES:\n\n\n' CHANGELOG.md
+          git add CHANGELOG.md
+          git commit -m "New changelog templated added after release of ${{ steps.tag_version.outputs.new_tag}}"
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          delete-branch: true
+          commit-message: New changelog templated added after release of ${{ steps.tag_version.outputs.new_tag}}
+          title: New changelog templated added after release of ${{ steps.tag_version.outputs.new_tag}}
+          body: New changelog templated added after release of ${{ steps.tag_version.outputs.new_tag}}
+          branch: release-${{ steps.tag_version.outputs.new_tag}}
+          base: main
